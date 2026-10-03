@@ -1,0 +1,5 @@
+add_executable(vnc_server main.cpp)
+target_link_libraries(vnc_server PRIVATE vnc_core)
+if(WIN32)
+  target_link_libraries(vnc_server PRIVATE vnc_windows)
+endif()
