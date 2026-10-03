@@ -1,6 +1,8 @@
 // vnc_server [--listen tls://0.0.0.0:5900] [--source screen|pattern] [--fps 60]
+//            [--monitors all|<comma-separated indices>]
 // vnc_server --set-password          (prompts for a password, stores its
 //                                      hash under the config directory)
+// vnc_server --list-monitors         (prints the available monitors and exits)
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -8,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -41,6 +44,29 @@ int setPassword() {
   Credentials c = makeCredentials(p1);
   saveCredentials(c, credentialsPath());
   std::fprintf(stderr, "password salvata in %s\n", credentialsPath().c_str());
+  return 0;
+}
+
+std::vector<int> parseMonitorList(const std::string& s) {
+  std::vector<int> out;
+  if (s.empty() || s == "all") return out;  // empty selection means "all"
+  std::stringstream ss(s);
+  std::string tok;
+  while (std::getline(ss, tok, ',')) if (!tok.empty()) out.push_back(std::atoi(tok.c_str()));
+  return out;
+}
+
+int listMonitors(ICaptureSource& source) {
+  auto monitors = source.listMonitors();
+  if (monitors.empty()) {
+    std::fprintf(stderr, "questa piattaforma/sorgente non distingue monitor singoli "
+                         "(verra' inviato tutto lo schermo)\n");
+    return 0;
+  }
+  for (const auto& m : monitors) {
+    std::fprintf(stderr, "%d: %s  %ux%u @ (%d,%d)%s\n", m.index, m.name.c_str(), m.width,
+                m.height, m.x, m.y, m.primary ? "  [primario]" : "");
+  }
   return 0;
 }
 
@@ -123,23 +149,17 @@ void serve(ITransport& t, const Credentials& creds, ICaptureSource& source, IInp
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string listen = "tls://0.0.0.0:5900", sourceName = "screen";
+  std::string listen = "tls://0.0.0.0:5900", sourceName = "screen", monitorSpec;
   int fps = 60;
+  bool doListMonitors = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--set-password")) return setPassword();
+    if (!std::strcmp(argv[i], "--list-monitors")) { doListMonitors = true; continue; }
     if (i + 1 >= argc) continue;
     if (!std::strcmp(argv[i], "--listen")) listen = argv[++i];
     else if (!std::strcmp(argv[i], "--source")) sourceName = argv[++i];
     else if (!std::strcmp(argv[i], "--fps")) fps = std::max(1, std::atoi(argv[++i]));
-  }
-
-  Credentials creds;
-  try {
-    creds = loadCredentials(credentialsPath());
-  } catch (const std::exception&) {
-    std::fprintf(stderr,
-                "nessuna password configurata: esegui prima '%s --set-password'\n", argv[0]);
-    return 1;
+    else if (!std::strcmp(argv[i], "--monitors")) monitorSpec = argv[++i];
   }
 
   std::unique_ptr<ICaptureSource> source;
@@ -154,6 +174,18 @@ int main(int argc, char** argv) {
   } else {
     source = makePatternSource(640, 360);
     input = makeNullInput();
+  }
+
+  if (doListMonitors) return listMonitors(*source);
+  source->selectMonitors(parseMonitorList(monitorSpec));
+
+  Credentials creds;
+  try {
+    creds = loadCredentials(credentialsPath());
+  } catch (const std::exception&) {
+    std::fprintf(stderr,
+                "nessuna password configurata: esegui prima '%s --set-password'\n", argv[0]);
+    return 1;
   }
 
   try {

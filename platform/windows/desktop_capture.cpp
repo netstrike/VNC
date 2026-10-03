@@ -1,13 +1,14 @@
-// Screen capture backend for Windows: DXGI Desktop Duplication, with a GDI
-// BitBlt fallback for the cases DXGI does not cover (older hardware, or a
-// desktop where DXGI duplication is not available). The caller already
-// requires an authenticated, TLS-encrypted connection (see vnc/auth.h and
-// vnc/tls_transport.h) before any frame reaches the network; this file only
-// produces the pixels.
+// Screen capture backend for Windows: DXGI Desktop Duplication for the
+// common single-monitor case, with a GDI BitBlt path used whenever a
+// specific subset of monitors is selected (or DXGI is unavailable). The
+// caller already requires an authenticated, TLS-encrypted connection (see
+// vnc/auth.h and vnc/tls_transport.h) before any frame reaches the network;
+// this file only produces the pixels.
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -30,8 +31,63 @@ struct ComPtr {
   explicit operator bool() const { return p != nullptr; }
 };
 
+struct Box { int32_t x1 = 0, y1 = 0, x2 = 0, y2 = 0; };
+
+BOOL CALLBACK monitorEnumProc(HMONITOR hMon, HDC, LPRECT, LPARAM data) {
+  auto* out = reinterpret_cast<std::vector<MonitorInfo>*>(data);
+  MONITORINFOEXW info{};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoW(hMon, &info)) return TRUE;
+  MonitorInfo m;
+  m.index = static_cast<int>(out->size());
+  m.x = info.rcMonitor.left;
+  m.y = info.rcMonitor.top;
+  m.width = static_cast<uint16_t>(info.rcMonitor.right - info.rcMonitor.left);
+  m.height = static_cast<uint16_t>(info.rcMonitor.bottom - info.rcMonitor.top);
+  m.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+  int len = WideCharToMultiByte(CP_UTF8, 0, info.szDevice, -1, nullptr, 0, nullptr, nullptr);
+  if (len > 0) {
+    std::string name(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, info.szDevice, -1, name.data(), len, nullptr, nullptr);
+    m.name = name;
+  }
+  out->push_back(m);
+  return TRUE;
+}
+
+std::vector<MonitorInfo> enumMonitors() {
+  std::vector<MonitorInfo> out;
+  EnumDisplayMonitors(nullptr, nullptr, monitorEnumProc, reinterpret_cast<LPARAM>(&out));
+  return out;
+}
+
+Box boundingBoxFor(const std::vector<MonitorInfo>& monitors, const std::vector<int>& indices) {
+  if (monitors.empty()) {
+    return Box{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+               GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+               GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+  }
+  const bool all = indices.empty();
+  Box b{INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN};
+  bool any = false;
+  for (const auto& m : monitors) {
+    bool wanted = all || std::find(indices.begin(), indices.end(), m.index) != indices.end();
+    if (!wanted) continue;
+    any = true;
+    b.x1 = std::min(b.x1, m.x);
+    b.y1 = std::min(b.y1, m.y);
+    b.x2 = std::max(b.x2, int32_t(m.x + m.width));
+    b.y2 = std::max(b.y2, int32_t(m.y + m.height));
+  }
+  if (!any) return boundingBoxFor(monitors, {});  // no valid index selected: fall back to all
+  return b;
+}
+
 class DesktopCapture : public ICaptureSource {
 public:
+  std::vector<MonitorInfo> listMonitors() override { return enumMonitors(); }
+  void selectMonitors(const std::vector<int>& indices) override { selected_ = indices; }
+
   bool grab(Frame& out) override {
     // Re-attach every call: the input desktop can change between grabs.
     std::wstring desk = win::attachToInputDesktop();
@@ -42,8 +98,19 @@ public:
       dxgiFailed_ = false;
     }
 
-    if (!dxgiFailed_ && grabDxgi()) { out = last_; return true; }
-    if (grabGdi()) { out = last_; return true; }
+    auto monitors = enumMonitors();
+    const bool wantsEverything = selected_.empty() || selected_.size() >= monitors.size();
+
+    // Fast path: a single physical monitor and nothing excluded from it.
+    // Multi-monitor composition (several selected, or several present with
+    // none excluded) goes through the slower but simpler GDI path below.
+    if (wantsEverything && monitors.size() <= 1 && !dxgiFailed_ && grabDxgi()) {
+      out = last_;
+      return true;
+    }
+
+    Box box = boundingBoxFor(monitors, selected_);
+    if (grabGdi(box)) { out = last_; return true; }
     return false;
   }
 
@@ -61,7 +128,7 @@ private:
     if (FAILED(dev_->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev))))
       return false;
     if (FAILED(dxgiDev->GetAdapter(&adapter))) return false;
-    if (FAILED(adapter->EnumOutputs(0, &output))) return false;  // primary output for now
+    if (FAILED(adapter->EnumOutputs(0, &output))) return false;
     if (FAILED(output->QueryInterface(__uuidof(IDXGIOutput1), reinterpret_cast<void**>(&output1))))
       return false;
     if (FAILED(output1->DuplicateOutput(dev_.p, &dup_))) return false;
@@ -119,9 +186,11 @@ private:
     return true;
   }
 
-  bool grabGdi() {
-    const int x = GetSystemMetrics(SM_XVIRTUALSCREEN), y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int w = GetSystemMetrics(SM_CXVIRTUALSCREEN), h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+  // Captures exactly the virtual-desktop rectangle `box` (which may be the
+  // full virtual screen, a single monitor, or the union of several selected
+  // monitors) via BitBlt.
+  bool grabGdi(const Box& box) {
+    const int w = box.x2 - box.x1, h = box.y2 - box.y1;
     if (w <= 0 || h <= 0) return false;
     HDC screen = GetDC(nullptr);
     if (!screen) return false;
@@ -138,7 +207,7 @@ private:
     bool ok = false;
     if (bmp) {
       HGDIOBJ old = SelectObject(mem, bmp);
-      if (BitBlt(mem, 0, 0, w, h, screen, x, y, SRCCOPY | CAPTUREBLT)) {
+      if (BitBlt(mem, 0, 0, w, h, screen, box.x1, box.y1, SRCCOPY | CAPTUREBLT)) {
         last_.width = static_cast<uint16_t>(w);
         last_.height = static_cast<uint16_t>(h);
         last_.bgra.assign(static_cast<uint8_t*>(bits), static_cast<uint8_t*>(bits) + size_t(w) * h * 4);
@@ -160,6 +229,7 @@ private:
   UINT stagingW_ = 0, stagingH_ = 0;
   bool dxgiFailed_ = false;
   std::wstring desktop_;
+  std::vector<int> selected_;
   Frame last_;
 };
 
