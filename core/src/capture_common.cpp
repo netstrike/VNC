@@ -43,10 +43,4 @@ std::unique_ptr<ICaptureSource> makePatternSource(uint16_t w, uint16_t h) {
 }
 std::unique_ptr<IInputSink> makeNullInput() { return std::make_unique<NullInput>(); }
 
-#ifndef _WIN32
-// No real backend on this platform yet.
-std::unique_ptr<ICaptureSource> makeScreenSource() { return nullptr; }
-std::unique_ptr<IInputSink> makeScreenInput() { return nullptr; }
-#endif
-
 }  // namespace vnc

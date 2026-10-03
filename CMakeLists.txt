@@ -13,6 +13,8 @@ add_subdirectory(client)
 
 if(WIN32)
   add_subdirectory(platform/windows)
+elseif(UNIX AND NOT APPLE)
+  add_subdirectory(platform/linux)
 endif()
 
 if(VNC_BUILD_TESTS)
