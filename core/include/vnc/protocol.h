@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -17,12 +18,15 @@ constexpr uint16_t kProtocolVersion = 1;
 constexpr uint32_t kMaxPayload = 256u * 1024 * 1024;
 
 enum class MsgType : uint8_t {
-  Hello = 1,         // both directions, first message
-  FrameUpdate = 2,   // server -> client
-  KeyEvent = 3,      // client -> server
-  PointerEvent = 4,  // client -> server
-  Clipboard = 5,     // both directions
-  Bye = 6,
+  Hello = 1,          // both directions, first message after the TLS handshake
+  AuthChallenge = 2,  // server -> client, 16-byte random nonce
+  AuthResponse = 3,   // client -> server, HMAC-SHA256(derivedKey, nonce)
+  AuthResult = 4,     // server -> client, 1 byte: 1 = ok, 0 = failed
+  FrameUpdate = 5,    // server -> client
+  KeyEvent = 6,       // client -> server
+  PointerEvent = 7,   // client -> server
+  Clipboard = 8,       // both directions
+  Bye = 9,
 };
 
 enum class Encoding : uint8_t {
@@ -63,8 +67,19 @@ struct Message {
   std::vector<uint8_t> payload;
 };
 
+// Carries what the client needs to derive the same key the server checks
+// against: the password never travels on the wire, so it must be combined
+// client-side with the server's PBKDF2 salt/iteration count, the same way
+// the server derived it when the password was set (see auth.h).
+struct AuthChallenge {
+  std::vector<uint8_t> salt;   // PBKDF2 salt, as stored server-side
+  uint32_t iterations = 0;
+  std::array<uint8_t, 16> nonce{};  // fresh per session, prevents replay
+};
+
 // Serialisation
 std::vector<uint8_t> encode(const Hello&);
+std::vector<uint8_t> encode(const AuthChallenge&);
 std::vector<uint8_t> encode(const FrameUpdate&);
 std::vector<uint8_t> encode(const KeyEvent&);
 std::vector<uint8_t> encode(const PointerEvent&);
@@ -72,6 +87,7 @@ std::vector<uint8_t> encodeClipboard(const std::string& utf8);
 
 // Parsing: throw std::runtime_error on malformed input.
 Hello decodeHello(const std::vector<uint8_t>&);
+AuthChallenge decodeAuthChallenge(const std::vector<uint8_t>&);
 FrameUpdate decodeFrameUpdate(const std::vector<uint8_t>&);
 KeyEvent decodeKeyEvent(const std::vector<uint8_t>&);
 PointerEvent decodePointerEvent(const std::vector<uint8_t>&);
@@ -79,5 +95,12 @@ std::string decodeClipboard(const std::vector<uint8_t>&);
 
 void sendMessage(ITransport&, MsgType, const std::vector<uint8_t>& payload);
 Message receiveMessage(ITransport&);
+
+// Thin helpers so callers don't hand-roll vector<->array conversions for the
+// fixed-size auth messages.
+std::vector<uint8_t> toPayload(const std::array<uint8_t, 16>&);
+std::vector<uint8_t> toPayload(const std::array<uint8_t, 32>&);
+std::array<uint8_t, 16> toNonce(const std::vector<uint8_t>&);
+std::array<uint8_t, 32> toDigest(const std::vector<uint8_t>&);
 
 }  // namespace vnc

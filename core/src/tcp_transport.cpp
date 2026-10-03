@@ -89,6 +89,8 @@ public:
 
   std::string peer() const override { return peer_; }
 
+  socket_t fd() const { return s_; }
+
 private:
   socket_t s_;
   std::string peer_;
@@ -152,6 +154,12 @@ std::unique_ptr<ITransport> tcpConnect(const std::string& host, uint16_t port) {
     closeSocket(s);
   }
   throw std::runtime_error("tcp connect to " + host + ":" + std::to_string(port) + " failed");
+}
+
+int tcpTransportFd(ITransport& t) {
+  auto* tcp = dynamic_cast<TcpTransport*>(&t);
+  if (!tcp) throw std::runtime_error("tcpTransportFd: not a TCP transport");
+  return static_cast<int>(tcp->fd());
 }
 
 std::unique_ptr<IListener> tcpListen(const std::string& host, uint16_t port) {

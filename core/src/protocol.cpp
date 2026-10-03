@@ -63,6 +63,27 @@ Hello decodeHello(const std::vector<uint8_t>& p) {
   return h;
 }
 
+std::vector<uint8_t> encode(const AuthChallenge& a) {
+  Writer w;
+  w.u32(static_cast<uint32_t>(a.salt.size()));
+  w.bytes(a.salt.data(), a.salt.size());
+  w.u32(a.iterations);
+  w.bytes(a.nonce.data(), a.nonce.size());
+  return w.take();
+}
+
+AuthChallenge decodeAuthChallenge(const std::vector<uint8_t>& p) {
+  Reader r(p);
+  AuthChallenge a;
+  uint32_t saltLen = r.u32();
+  if (saltLen > r.remaining()) throw std::runtime_error("protocol: bad salt length");
+  a.salt.resize(saltLen);
+  r.bytes(a.salt.data(), saltLen);
+  a.iterations = r.u32();
+  r.bytes(a.nonce.data(), a.nonce.size());
+  return a;
+}
+
 std::vector<uint8_t> encode(const FrameUpdate& f) {
   Writer w;
   w.u16(f.width);
@@ -152,6 +173,28 @@ void sendMessage(ITransport& t, MsgType type, const std::vector<uint8_t>& payloa
   out.insert(out.end(), header, header + 5);
   out.insert(out.end(), payload.begin(), payload.end());
   t.writeAll(out.data(), out.size());
+}
+
+std::vector<uint8_t> toPayload(const std::array<uint8_t, 16>& a) {
+  return std::vector<uint8_t>(a.begin(), a.end());
+}
+
+std::vector<uint8_t> toPayload(const std::array<uint8_t, 32>& a) {
+  return std::vector<uint8_t>(a.begin(), a.end());
+}
+
+std::array<uint8_t, 16> toNonce(const std::vector<uint8_t>& p) {
+  if (p.size() != 16) throw std::runtime_error("protocol: expected 16-byte nonce");
+  std::array<uint8_t, 16> a;
+  std::copy(p.begin(), p.end(), a.begin());
+  return a;
+}
+
+std::array<uint8_t, 32> toDigest(const std::vector<uint8_t>& p) {
+  if (p.size() != 32) throw std::runtime_error("protocol: expected 32-byte digest");
+  std::array<uint8_t, 32> a;
+  std::copy(p.begin(), p.end(), a.begin());
+  return a;
 }
 
 Message receiveMessage(ITransport& t) {

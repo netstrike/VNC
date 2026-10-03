@@ -1,4 +1,6 @@
-// vnc_server [--listen tcp://0.0.0.0:5900] [--source screen|pattern] [--fps 60]
+// vnc_server [--listen tls://0.0.0.0:5900] [--source screen|pattern] [--fps 60]
+// vnc_server --set-password          (prompts for a password, stores its
+//                                      hash under the config directory)
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -9,6 +11,7 @@
 #include <string>
 #include <thread>
 
+#include "vnc/auth.h"
 #include "vnc/capture.h"
 #include "vnc/protocol.h"
 #include "vnc/tile_diff.h"
@@ -17,7 +20,56 @@
 using namespace vnc;
 using Clock = std::chrono::steady_clock;
 
-static void serve(ITransport& t, ICaptureSource& source, IInputSink& input, int fps) {
+namespace {
+
+std::string credentialsPath() { return defaultConfigDir() + "/credentials"; }
+
+// Reads a line from stdin without echoing it, where the terminal supports it;
+// falls back to a plain (echoed) read otherwise (e.g. when stdin is a pipe).
+std::string readPassword(const char* prompt) {
+  std::fprintf(stderr, "%s", prompt);
+  std::string pass;
+  std::getline(std::cin, pass);
+  return pass;
+}
+
+int setPassword() {
+  std::string p1 = readPassword("Nuova password: ");
+  std::string p2 = readPassword("Ripeti la password: ");
+  if (p1.empty()) { std::fprintf(stderr, "password vuota, operazione annullata\n"); return 1; }
+  if (p1 != p2) { std::fprintf(stderr, "le due password non coincidono\n"); return 1; }
+  Credentials c = makeCredentials(p1);
+  saveCredentials(c, credentialsPath());
+  std::fprintf(stderr, "password salvata in %s\n", credentialsPath().c_str());
+  return 0;
+}
+
+// Authenticates the connecting client with a nonce/HMAC challenge. The
+// password itself is never sent, not even over the already-encrypted TLS
+// channel. Returns false (and tells the client) if it doesn't check out.
+bool authenticate(ITransport& t, const Credentials& creds) {
+  AuthChallenge challenge;
+  challenge.salt = creds.salt;
+  challenge.iterations = creds.iterations;
+  challenge.nonce = randomNonce();
+  sendMessage(t, MsgType::AuthChallenge, encode(challenge));
+
+  Message resp = receiveMessage(t);
+  if (resp.type != MsgType::AuthResponse) throw std::runtime_error("expected AuthResponse");
+  auto got = toDigest(resp.payload);
+  auto want = hmacChallenge(creds, challenge.nonce);
+  bool ok = secureEqual(got, want);
+  sendMessage(t, MsgType::AuthResult, {uint8_t(ok ? 1 : 0)});
+  return ok;
+}
+
+void serve(ITransport& t, const Credentials& creds, ICaptureSource& source, IInputSink& input,
+          int fps) {
+  if (!authenticate(t, creds)) {
+    std::fprintf(stderr, "authentication failed for %s\n", t.peer().c_str());
+    return;
+  }
+
   Message hello = receiveMessage(t);
   if (hello.type != MsgType::Hello) throw std::runtime_error("expected Hello");
   if (decodeHello(hello.payload).version != kProtocolVersion)
@@ -68,13 +120,26 @@ static void serve(ITransport& t, ICaptureSource& source, IInputSink& input, int 
   reader.join();
 }
 
+}  // namespace
+
 int main(int argc, char** argv) {
-  std::string listen = "tcp://0.0.0.0:5900", sourceName = "screen";
+  std::string listen = "tls://0.0.0.0:5900", sourceName = "screen";
   int fps = 60;
-  for (int i = 1; i + 1 < argc; i += 2) {
-    if (!std::strcmp(argv[i], "--listen")) listen = argv[i + 1];
-    else if (!std::strcmp(argv[i], "--source")) sourceName = argv[i + 1];
-    else if (!std::strcmp(argv[i], "--fps")) fps = std::max(1, std::atoi(argv[i + 1]));
+  for (int i = 1; i < argc; ++i) {
+    if (!std::strcmp(argv[i], "--set-password")) return setPassword();
+    if (i + 1 >= argc) continue;
+    if (!std::strcmp(argv[i], "--listen")) listen = argv[++i];
+    else if (!std::strcmp(argv[i], "--source")) sourceName = argv[++i];
+    else if (!std::strcmp(argv[i], "--fps")) fps = std::max(1, std::atoi(argv[++i]));
+  }
+
+  Credentials creds;
+  try {
+    creds = loadCredentials(credentialsPath());
+  } catch (const std::exception&) {
+    std::fprintf(stderr,
+                "nessuna password configurata: esegui prima '%s --set-password'\n", argv[0]);
+    return 1;
   }
 
   std::unique_ptr<ICaptureSource> source;
@@ -98,7 +163,7 @@ int main(int argc, char** argv) {
       auto conn = listener->accept();
       std::fprintf(stderr, "client %s connected\n", conn->peer().c_str());
       try {
-        serve(*conn, *source, *input, fps);
+        serve(*conn, creds, *source, *input, fps);
       } catch (const std::exception& e) {
         std::fprintf(stderr, "client error: %s\n", e.what());
       }

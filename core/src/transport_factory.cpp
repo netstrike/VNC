@@ -1,7 +1,9 @@
 #include <stdexcept>
 #include <string>
 
+#include "vnc/auth.h"
 #include "vnc/tcp_transport.h"
+#include "vnc/tls_transport.h"
 #include "vnc/transport.h"
 
 namespace vnc {
@@ -50,12 +52,18 @@ Uri parse(const std::string& uri) {
 std::unique_ptr<ITransport> connectTo(const std::string& uri) {
   Uri u = parse(uri);
   if (u.scheme == "tcp") return tcpConnect(u.host, u.port);
+  if (u.scheme == "tls") return tlsConnect(u.host, u.port, defaultConfigDir() + "/known_hosts");
   throw std::runtime_error("unsupported transport scheme: " + u.scheme);
 }
 
 std::unique_ptr<IListener> listenOn(const std::string& uri) {
   Uri u = parse(uri);
   if (u.scheme == "tcp") return tcpListen(u.host, u.port);
+  if (u.scheme == "tls") {
+    const std::string dir = defaultConfigDir();
+    ensureServerCertificate(dir + "/cert.pem", dir + "/key.pem");
+    return tlsListen(u.host, u.port, dir + "/cert.pem", dir + "/key.pem");
+  }
   throw std::runtime_error("unsupported transport scheme: " + u.scheme);
 }
 

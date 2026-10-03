@@ -1,20 +1,50 @@
-// vnc_client tcp://host:5900 [--frames N] [--out file.ppm]
-// Headless viewer for now: connects, applies updates and optionally dumps the
-// last frame as PPM. A GUI front-end will sit on top of the same loop.
+// vnc_client tls://host:5900 [--frames N] [--out file.ppm]
+// Headless viewer for now: connects, authenticates, applies updates and
+// optionally dumps the last frame as PPM. A GUI front-end will sit on top of
+// the same loop.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <string>
 
+#include "vnc/auth.h"
 #include "vnc/protocol.h"
 #include "vnc/tile_diff.h"
 #include "vnc/transport.h"
 
 using namespace vnc;
 
+namespace {
+
+// The password never travels on the wire: it is combined with the server's
+// random nonce through PBKDF2+HMAC, exactly as the server computes its own
+// side of the check (see auth.h).
+void authenticate(ITransport& t, const std::string& password) {
+  Message msg = receiveMessage(t);
+  if (msg.type != MsgType::AuthChallenge) throw std::runtime_error("expected AuthChallenge");
+  AuthChallenge challenge = decodeAuthChallenge(msg.payload);
+
+  // Derive the same key the server has stored, using the salt/iteration
+  // count it just sent, then answer its nonce with an HMAC. The password
+  // itself never goes on the wire.
+  Credentials c;
+  c.salt = challenge.salt;
+  c.iterations = challenge.iterations;
+  deriveKey(c, password);
+  auto response = hmacChallenge(c, challenge.nonce);
+  sendMessage(t, MsgType::AuthResponse, toPayload(response));
+
+  Message result = receiveMessage(t);
+  if (result.type != MsgType::AuthResult || result.payload.size() != 1 || result.payload[0] != 1)
+    throw std::runtime_error("authentication failed");
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: vnc_client tcp://host:port [--frames N] [--out file.ppm]\n");
+    std::fprintf(stderr, "usage: vnc_client tls://host:port [--frames N] [--out file.ppm]\n");
     return 2;
   }
   int frames = 0;
@@ -26,6 +56,12 @@ int main(int argc, char** argv) {
 
   try {
     auto t = connectTo(argv[1]);
+
+    std::fprintf(stderr, "Password: ");
+    std::string password;
+    std::getline(std::cin, password);
+    authenticate(*t, password);
+
     sendMessage(*t, MsgType::Hello, encode(Hello{}));
     Message hello = receiveMessage(*t);
     Hello h = decodeHello(hello.payload);
