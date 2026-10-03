@@ -16,7 +16,8 @@ struct Frame {
 std::vector<Rect> diffTiles(const Frame& prev, const Frame& cur, int tile = 64);
 
 // Applies rects to a frame (resizing it to width x height first if needed).
-void applyRects(Frame& frame, uint16_t width, uint16_t height,
-                const std::vector<Rect>& rects);
+// Decompresses each rect in place first if it isn't Encoding::Raw (see
+// vnc/compress.h), which is why `rects` isn't const.
+void applyRects(Frame& frame, uint16_t width, uint16_t height, std::vector<Rect>& rects);
 
 }  // namespace vnc

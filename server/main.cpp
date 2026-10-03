@@ -16,6 +16,7 @@
 
 #include "vnc/auth.h"
 #include "vnc/capture.h"
+#include "vnc/compress.h"
 #include "vnc/protocol.h"
 #include "vnc/tile_diff.h"
 #include "vnc/transport.h"
@@ -131,6 +132,7 @@ void serve(ITransport& t, const Credentials& creds, ICaptureSource& source, IInp
         u.width = cur.width;
         u.height = cur.height;
         u.rects = diffTiles(prev, cur);
+        for (Rect& r : u.rects) compressRect(r);
         if (!u.rects.empty()) {
           sendMessage(t, MsgType::FrameUpdate, encode(u));
           std::swap(prev, cur);

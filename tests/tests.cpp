@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -5,6 +6,7 @@
 
 #include "vnc/auth.h"
 #include "vnc/capture.h"
+#include "vnc/compress.h"
 #include "vnc/protocol.h"
 #include "vnc/tile_diff.h"
 #include "vnc/tls_transport.h"
@@ -30,7 +32,8 @@ static void testDiffLossless() {
   auto src = makePatternSource(200, 130);
   Frame a, b, remote;
   src->grab(a);
-  applyRects(remote, a.width, a.height, diffTiles(Frame{}, a));
+  auto firstRects = diffTiles(Frame{}, a);
+  applyRects(remote, a.width, a.height, firstRects);
   CHECK(remote.bgra == a.bgra);
   src->grab(b);
   auto rects = diffTiles(a, b);
@@ -58,6 +61,63 @@ static void testTcpLoopback() {
   FrameUpdate back = decodeFrameUpdate(echo.payload);
   CHECK(back.rects.size() == 1 && back.rects[0].data == r.data);
   server.join();
+}
+
+static void testCompressLossless() {
+  // Compressible content (a flat fill, typical of UI chrome): should shrink
+  // and round-trip exactly.
+  Rect flat;
+  flat.w = 64; flat.h = 64;
+  flat.data.assign(size_t(flat.w) * flat.h * 4, 0x42);
+  const auto originalFlat = flat.data;
+  compressRect(flat);
+  CHECK(flat.encoding == Encoding::Zstd);
+  CHECK(flat.data.size() < originalFlat.size());
+  decompressRect(flat);
+  CHECK(flat.encoding == Encoding::Raw);
+  CHECK(flat.data == originalFlat);
+
+  // Incompressible content (pseudo-random noise): compressRect must leave
+  // it as Raw rather than ship a bigger payload.
+  Rect noisy;
+  noisy.w = 32; noisy.h = 32;
+  noisy.data.resize(size_t(noisy.w) * noisy.h * 4);
+  unsigned seed = 12345;
+  for (auto& b : noisy.data) { seed = seed * 1103515245u + 12345u; b = uint8_t(seed >> 16); }
+  const auto originalNoisy = noisy.data;
+  compressRect(noisy);
+  CHECK(noisy.encoding == Encoding::Raw);
+  CHECK(noisy.data == originalNoisy);
+
+  // decompressRect on a Raw rect is a no-op.
+  Rect untouched = flat;
+  decompressRect(untouched);
+  CHECK(untouched.data == flat.data);
+}
+
+static void testCompressThroughFrameUpdate() {
+  // The same path the server/client actually use: diff a changed frame,
+  // compress its rects, encode/decode the message, then apply (which
+  // decompresses) and compare pixels.
+  auto src = makePatternSource(128, 96);
+  Frame a, b, remote;
+  src->grab(a);
+  auto firstRects = diffTiles(Frame{}, a);
+  applyRects(remote, a.width, a.height, firstRects);
+  src->grab(b);
+
+  FrameUpdate u;
+  u.width = b.width;
+  u.height = b.height;
+  u.rects = diffTiles(a, b);
+  CHECK(!u.rects.empty());
+  for (Rect& r : u.rects) compressRect(r);
+  CHECK(std::any_of(u.rects.begin(), u.rects.end(),
+                    [](const Rect& r) { return r.encoding == Encoding::Zstd; }));
+
+  FrameUpdate back = decodeFrameUpdate(encode(u));
+  applyRects(remote, back.width, back.height, back.rects);
+  CHECK(remote.bgra == b.bgra);
 }
 
 static void testAuthRoundTrip() {
@@ -143,6 +203,8 @@ int main() {
   testMessages();
   testDiffLossless();
   testTcpLoopback();
+  testCompressLossless();
+  testCompressThroughFrameUpdate();
   testAuthRoundTrip();
   testCredentialsPersist();
   testTlsLoopbackWithAuth();

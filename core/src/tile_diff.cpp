@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "vnc/compress.h"
+
 namespace vnc {
 
 std::vector<Rect> diffTiles(const Frame& prev, const Frame& cur, int tile) {
@@ -35,16 +37,16 @@ std::vector<Rect> diffTiles(const Frame& prev, const Frame& cur, int tile) {
   return out;
 }
 
-void applyRects(Frame& frame, uint16_t width, uint16_t height,
-                const std::vector<Rect>& rects) {
+void applyRects(Frame& frame, uint16_t width, uint16_t height, std::vector<Rect>& rects) {
   if (frame.width != width || frame.height != height) {
     frame.width = width;
     frame.height = height;
     frame.bgra.assign(size_t(width) * height * 4, 0);
   }
   const size_t stride = size_t(width) * 4;
-  for (const Rect& r : rects) {
-    if (r.encoding != Encoding::Raw) continue;
+  for (Rect& r : rects) {
+    if (r.encoding != Encoding::Raw) decompressRect(r);
+    if (r.encoding != Encoding::Raw) continue;  // unknown encoding: skip it
     if (size_t(r.x) + r.w > width || size_t(r.y) + r.h > height) continue;
     if (r.data.size() != size_t(r.w) * r.h * 4) continue;
     for (int row = 0; row < r.h; ++row) {

@@ -31,7 +31,7 @@ enum class MsgType : uint8_t {
 
 enum class Encoding : uint8_t {
   Raw = 0,
-  // Reserved: Zstd = 1, Lz4 = 2 (lossless, low compression level)
+  Zstd = 1,  // lossless; see vnc/compress.h
 };
 
 struct Hello {
